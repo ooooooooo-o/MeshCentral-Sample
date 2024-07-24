@@ -1,58 +1,90 @@
 "use strict";
 
-const express = require('express');
-const https = require('https');
-const bodyParser = require('body-parser');
-const fs = require('fs');
-const app = express();
+module.exports = function (parent) {
+  const express = require('express');
+  const bodyParser = require('body-parser');
+  const fs = require('fs');
+  const app = express();
+  const LOG_FILE = 'receivedData.txt'; 
 
-module.exports.sample = function (parent) {
-    var obj = {};
-    obj.parent = parent; // keep a reference to the parent
-    obj.exports = [
-        "onDesktopDisconnect" // export this function to the web UI
-    ];
+  // === MeshCentral Sample Module ===
+  var obj = {};
+  obj.parent = parent; 
+  obj.exports = ["onDesktopDisconnect"];
 
-    obj.onDesktopDisconnect = function() {  // this is called when the desktop disconnect button is clicked
-        writeDeviceEvent(encodeURIComponent(currentNode._id));  // mimic what the button does on the device main page to pull up a log
-        Q('d2devEvent').value = Date().toLocaleString() + ': '; // pre-fill the date for a timestamp
-        focusTextBox('d2devEvent');
+  obj.onDesktopDisconnect = function () { 
+    writeDeviceEvent(encodeURIComponent(currentNode._id)); 
+    Q('d2devEvent').value = Date().toLocaleString() + ': '; 
+    focusTextBox('d2devEvent');
+  };
+
+  obj.writeToMeshLog = function (data) {
+    if (obj.parent && obj.parent.webserver && obj.parent.webserver.dispatchEvent) {
+      obj.parent.webserver.dispatchEvent([
+        { action: 'log', msg: `Received data: ${data.data} from IP: ${data.ip}`, nodeid: null, eventType: 'custom' }
+      ]);
     }
+  };
 
-    // Function to write data to MeshCentral log
-    obj.writeToMeshLog = function(data) {
-        if (obj.parent && obj.parent.webserver && obj.parent.webserver.dispatchEvent) {
-            obj.parent.webserver.dispatchEvent([
-                { action: 'log', msg: `Received data: ${data.data} from IP: ${data.ip}`, nodeid: null, eventType: 'custom' }
-            ]);
+  // === Logging Server ===
+  app.use(bodyParser.json());
+  app.use(bodyParser.urlencoded({ extended: true }));
+
+  function writeDataToFile(data) {
+    fs.readFile(LOG_FILE, 'utf8', (readErr, content) => {
+      let dataList = [];
+      if (!readErr) {
+        try {
+          dataList = JSON.parse(content);
+        } catch (parseErr) {
+          console.error('Error parsing log file:', parseErr);
         }
+      }
+      dataList.push(data);
+      fs.writeFile(LOG_FILE, JSON.stringify(dataList, null, 2), (writeErr) => {
+        if (writeErr) {
+          console.error('Error writing to log file:', writeErr);
+        }
+      });
+    });
+  }
+
+  app.post('/Logger', (req, res) => {
+    const { data } = req.body;
+    const clientIp = req.ip;
+    console.log('POST Received data:', data, 'from IP:', clientIp);
+    writeDataToFile({ data, ip: clientIp });
+    obj.writeToMeshLog({ data, ip: clientIp });
+    res.sendStatus(200);
+  });
+
+  app.get('/Logger', (req, res) => {
+    const clientIp = req.ip;
+    const receivedData = req.query.data || ''; // Lấy dữ liệu (nếu có) từ query string
+
+    console.log('GET Received data:', receivedData, 'from IP:', clientIp);
+    writeDataToFile({ data: receivedData, ip: clientIp });
+
+    const currentNode = parent.webserver.ws.nodes[parent.webserver.ws.m];
+    if (currentNode && currentNode._id) {
+      const message = `Client IP: ${clientIp} connected to node ${currentNode._id}`;
+      obj.writeToMeshLog({ data: message, ip: clientIp });
+      res.send(message); 
+    } else {
+      res.status(500).send('Node information not found');
     }
+  });
 
-    // Express Server for Logging
-    const path = '/home/restricteduser/log/receivedData.txt';
+  // Khởi tạo server HTTP
+  const server = app.listen(parent.webserver.port, () => {
+    console.log('Logging server listening on port:', parent.webserver.port);
+  });
 
-    const server = https.createServer({
-        key: fs.readFileSync('/home/restricteduser/log/production.key'),
-        cert: fs.readFileSync('/home/restricteduser/log/production.crt'),
-    }, app);
-
-    app.use(bodyParser.json());
-    app.use(bodyParser.urlencoded({ extended: true }));
-
-    const writeDataToFile = (data) => {
-        fs.readFile(path, 'utf8', (err, content) => {
-            let dataList = [];
-
-            if (!err) {
-                try {
-                    dataList = JSON.parse(content);
-                } catch (parseErr) {
-                    console.error('Error parsing file content:', parseErr);
-                }
-            }
-
-            dataList.push(data);
-
-            fs.writeFile(path, JSON.stringify(dataList, null, 2), (writeErr) => {
-                if (writeErr) {
-                    console.error('
+  return {
+    server: server,
+    stop: () => {
+      server.close();
+    },
+    sample: obj 
+  };
+};
